@@ -62,7 +62,14 @@ exports.searchWithRAG = async (req, res) => {
 
     // Adjust similarity threshold based on embedding provider
     const embeddingProvider = process.env.EMBEDDING_PROVIDER || 'local';
-    const minSimilarity = embeddingProvider === 'local' ? 0.15 : 0.5; // Slightly higher threshold for better quality
+    // Lower threshold for local/gemini embeddings since they use hybrid scoring
+    const minSimilarity = (embeddingProvider === 'local' || embeddingProvider === 'gemini') ? 0.05 : 0.5;
+
+    console.log(`🔍 Search: "${query}"`);
+    console.log(`📊 Top results:`, similarDocs.slice(0, 3).map(d => ({
+      title: d.article.title.substring(0, 50),
+      similarity: (d.similarity * 100).toFixed(1) + '%'
+    })));
 
     if (similarDocs.length === 0 || similarDocs[0].similarity < minSimilarity) {
       return res.json({

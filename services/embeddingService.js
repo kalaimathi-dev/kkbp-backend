@@ -10,6 +10,7 @@ class EmbeddingService {
     this.provider = process.env.EMBEDDING_PROVIDER || 'local';
     this.openaiKey = process.env.OPENAI_API_KEY;
     this.geminiKey = process.env.GEMINI_API_KEY;
+    this.hasLoggedEmbeddingInfo = false; // Flag to log only once
     
     if (this.provider === 'openai' && this.openaiKey) {
       this.openai = new OpenAI({ apiKey: this.openaiKey });
@@ -17,9 +18,12 @@ class EmbeddingService {
     } else if (this.provider === 'gemini' && this.geminiKey) {
       this.genAI = new GoogleGenerativeAI(this.geminiKey);
       // Gemini uses 'embedding-001' or 'models/embedding-001' format
-      const modelName = process.env.EMBEDDING_MODEL || 'embedding-001';
+      const modelName = process.env.EMBEDDING_MODEL || 'gemini-embedding-001';
       this.embeddingModel = modelName.startsWith('models/') ? modelName : `models/${modelName}`;
-      this.llmModel = process.env.LLM_MODEL || 'gemini-1.5-flash';
+      this.llmModel = process.env.LLM_MODEL || 'gemini-2.0-flash-exp';
+      // Use local embeddings as Gemini doesn't support embedding API
+      this.vectorSize = 256;
+      console.log('🤖 Gemini Mode: Local embeddings + Gemini AI answers');
     } else if (this.provider === 'local') {
       // Local TF-IDF based embeddings (100% free, no API calls)
       this.embeddingModel = 'local-tfidf-v2';
@@ -74,9 +78,7 @@ class EmbeddingService {
    * Note: Current Gemini API doesn't support embeddings, so we fallback to local
    */
   async generateGeminiEmbedding(text) {
-    // Gemini doesn't have a public embedding API yet
-    // Use local embeddings instead
-    console.log('ℹ️  Using local embeddings (Gemini embedding API not available)');
+    // Gemini doesn't have a public embedding API yet - use local embeddings
     return this.generateLocalEmbedding(text);
   }
 
