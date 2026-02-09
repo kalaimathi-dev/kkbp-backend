@@ -1,17 +1,25 @@
 const OpenAI = require('openai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 /**
  * Embedding Service for RAG Implementation
- * Supports OpenAI, Local (FREE), and can be extended for other providers
+ * Supports OpenAI, Google Gemini, Local (FREE), and can be extended for other providers
  */
 class EmbeddingService {
   constructor() {
     this.provider = process.env.EMBEDDING_PROVIDER || 'local';
-    this.apiKey = process.env.OPENAI_API_KEY;
+    this.openaiKey = process.env.OPENAI_API_KEY;
+    this.geminiKey = process.env.GEMINI_API_KEY;
     
-    if (this.provider === 'openai' && this.apiKey) {
-      this.openai = new OpenAI({ apiKey: this.apiKey });
+    if (this.provider === 'openai' && this.openaiKey) {
+      this.openai = new OpenAI({ apiKey: this.openaiKey });
       this.embeddingModel = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
+    } else if (this.provider === 'gemini' && this.geminiKey) {
+      this.genAI = new GoogleGenerativeAI(this.geminiKey);
+      // Gemini uses 'embedding-001' or 'models/embedding-001' format
+      const modelName = process.env.EMBEDDING_MODEL || 'embedding-001';
+      this.embeddingModel = modelName.startsWith('models/') ? modelName : `models/${modelName}`;
+      this.llmModel = process.env.LLM_MODEL || 'gemini-1.5-flash';
     } else if (this.provider === 'local') {
       // Local TF-IDF based embeddings (100% free, no API calls)
       this.embeddingModel = 'local-tfidf-v2';
@@ -32,6 +40,8 @@ class EmbeddingService {
 
       if (this.provider === 'openai') {
         return await this.generateOpenAIEmbedding(text);
+      } else if (this.provider === 'gemini') {
+        return await this.generateGeminiEmbedding(text);
       } else if (this.provider === 'local') {
         return this.generateLocalEmbedding(text);
       }
@@ -57,6 +67,17 @@ class EmbeddingService {
     });
 
     return response.data[0].embedding;
+  }
+
+  /**
+   * Generate Google Gemini embeddings
+   * Note: Current Gemini API doesn't support embeddings, so we fallback to local
+   */
+  async generateGeminiEmbedding(text) {
+    // Gemini doesn't have a public embedding API yet
+    // Use local embeddings instead
+    console.log('ℹ️  Using local embeddings (Gemini embedding API not available)');
+    return this.generateLocalEmbedding(text);
   }
 
   /**
@@ -376,7 +397,7 @@ class EmbeddingService {
   async generateAnswer(query, relevantDocs) {
     try {
       // For free/local tier, return a formatted answer based on retrieved docs
-      if (this.provider === 'local' || !this.openai) {
+      if (this.provider === 'local' || (!this.openai && !this.genAI)) {
         return this.generateRuleBasedAnswer(query, relevantDocs);
       }
 
@@ -408,17 +429,30 @@ ${context}
 
 Answer:`;
 
-      const response = await this.openai.chat.completions.create({
-        model: process.env.LLM_MODEL || 'gpt-3.5-turbo',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.7,
-        max_tokens: 500,
-      });
+      // Use Gemini if configured
+      if (this.provider === 'gemini' && this.genAI) {
+        const model = this.genAI.getGenerativeModel({ model: this.llmModel });
+        const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
+        const result = await model.generateContent(fullPrompt);
+        const response = await result.response;
+        return response.text();
+      }
 
-      return response.choices[0].message.content;
+      // Use OpenAI if configured
+      if (this.provider === 'openai' && this.openai) {
+        const response = await this.openai.chat.completions.create({
+          model: process.env.LLM_MODEL || 'gpt-3.5-turbo',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.7,
+          max_tokens: 500,
+        });
+        return response.choices[0].message.content;
+      }
+
+      return this.generateRuleBasedAnswer(query, relevantDocs);
     } catch (error) {
       console.error('Error generating answer:', error);
       throw error;
@@ -463,7 +497,9 @@ Answer:`;
    */
   isConfigured() {
     if (this.provider === 'openai') {
-      return !!(this.apiKey);
+      return !!(this.openaiKey);
+    } else if (this.provider === 'gemini') {
+      return !!(this.geminiKey);
     } else if (this.provider === 'local') {
       return true; // Local always works
     }

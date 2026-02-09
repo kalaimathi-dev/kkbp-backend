@@ -5,6 +5,10 @@ package-lock.json
 # Environment variables
 .env
 
+# Uploads (user-generated content)
+uploads/pdfs/*.pdf
+!uploads/pdfs/.gitkeep
+
 # Logs
 logs/
 *.log
@@ -26,3 +30,4 @@ Thumbs.db
 # Build files
 dist/
 build/
+
