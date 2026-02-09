@@ -45,6 +45,18 @@ const articleSchema = new mongoose.Schema(
       default: null,
     },
     tags: [{ type: mongoose.Schema.Types.ObjectId, ref: "Tag" }],
+    pdfFile: {
+      type: String,
+      default: null,
+    },
+    pdfOriginalName: {
+      type: String,
+      default: null,
+    },
+    pdfText: {
+      type: String,
+      default: null,
+    },
     approvedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

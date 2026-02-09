@@ -1,7 +1,123 @@
-const { Article, Category, Tag } = require('../models');
+const { Article, Category, Tag, ArticleEmbedding } = require('../models');
+const embeddingService = require('../services/embeddingService');
 
 /**
- * Search for relevant approved articles based on user query
+ * Search using RAG (Retrieval-Augmented Generation)
+ * @route POST /api/chatbot/rag-search
+ */
+exports.searchWithRAG = async (req, res) => {
+  try {
+    const { query } = req.body;
+
+    if (!query || query.trim().length === 0) {
+      return res.status(400).json({ 
+        message: 'Please provide a search query' 
+      });
+    }
+
+    // Check if embedding service is configured
+    if (!embeddingService.isConfigured()) {
+      return res.status(503).json({
+        message: 'RAG service is not configured. Please set OPENAI_API_KEY in environment variables.',
+        fallbackAvailable: true
+      });
+    }
+
+    // Generate embedding for the query
+    const queryEmbedding = await embeddingService.generateEmbedding(query);
+
+    // Get all article embeddings
+    const articleEmbeddings = await ArticleEmbedding.find({})
+      .populate({
+        path: 'article',
+        match: { status: 'APPROVED' },
+        populate: [
+          { path: 'category', select: 'name' },
+          { path: 'tags', select: 'name' },
+          { path: 'author', select: 'username email' }
+        ]
+      });
+
+    // Filter out articles that don't exist or aren't approved
+    const validEmbeddings = articleEmbeddings.filter(emb => emb.article);
+
+    if (validEmbeddings.length === 0) {
+      return res.json({
+        found: false,
+        message: '❌ No indexed articles found. Please index articles first.',
+        needsIndexing: true
+      });
+    }
+
+    // Find similar documents using HYBRID search (semantic + keyword matching)
+    const similarDocs = embeddingService.findSimilarDocumentsHybrid(
+      query,
+      queryEmbedding,
+      validEmbeddings.map(emb => ({
+        ...emb.toObject(),
+        article: emb.article.toObject()
+      })),
+      5
+    );
+
+    // Adjust similarity threshold based on embedding provider
+    const embeddingProvider = process.env.EMBEDDING_PROVIDER || 'local';
+    const minSimilarity = embeddingProvider === 'local' ? 0.15 : 0.5; // Slightly higher threshold for better quality
+
+    if (similarDocs.length === 0 || similarDocs[0].similarity < minSimilarity) {
+      return res.json({
+        found: false,
+        message: '❌ No relevant articles found for your query. Try rephrasing or submit this solution to KKBP once resolved.'
+      });
+    }
+
+    // Generate AI answer using the retrieved documents
+    const relevantArticles = similarDocs.slice(0,3).map(doc => ({
+      title: doc.article.title,
+      content: doc.article.content,
+      excerpt: doc.article.excerpt
+    }));
+
+    const aiAnswer = await embeddingService.generateAnswer(query, relevantArticles);
+
+    // Format response
+    const response = {
+      found: true,
+      ragEnabled: true,
+      aiAnswer,
+      sources: similarDocs.slice(0, 3).map((doc, idx) => ({
+        id: doc.article._id,
+        title: doc.article.title,
+        category: doc.article.category?.name || 'Uncategorized',
+        excerpt: doc.article.excerpt || '',
+        similarity: (doc.similarity * 100).toFixed(1) + '%',
+        tags: doc.article.tags ? doc.article.tags.map(tag => tag.name) : [],
+        views: doc.article.views || 0,
+        author: doc.article.author?.username || 'Unknown',
+        pdfFile: doc.article.pdfFile || null,
+        pdfOriginalName: doc.article.pdfOriginalName || null
+      })),
+      alternativeResults: similarDocs.slice(3, 5).map(doc => ({
+        id: doc.article._id,
+        title: doc.article.title,
+        category: doc.article.category?.name || 'Uncategorized',
+        similarity: (doc.similarity * 100).toFixed(1) + '%'
+      }))
+    };
+
+    res.json(response);
+
+  } catch (error) {
+    console.error('RAG search error:', error);
+    res.status(500).json({ 
+      message: 'Error performing RAG search',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Search for relevant approved articles based on user query (Keyword-based fallback)
  * @route POST /api/chatbot/search
  */
 exports.searchKnowledgeBase = async (req, res) => {
@@ -230,6 +346,188 @@ exports.getChatbotAnalytics = async (req, res) => {
     console.error('Chatbot analytics error:', error);
     res.status(500).json({ 
       message: 'Error fetching chatbot analytics',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Index a single article for RAG
+ * @route POST /api/chatbot/index-article/:articleId
+ */
+exports.indexArticle = async (req, res) => {
+  try {
+    const { articleId } = req.params;
+
+    // Check if embedding service is configured
+    if (!embeddingService.isConfigured()) {
+      return res.status(503).json({
+        message: 'Embedding service is not configured. Please set OPENAI_API_KEY.'
+      });
+    }
+
+    // Get the article
+    const article = await Article.findById(articleId);
+    if (!article) {
+      return res.status(404).json({ message: 'Article not found' });
+    }
+
+    if (article.status !== 'APPROVED') {
+      return res.status(400).json({ 
+        message: 'Only approved articles can be indexed' 
+      });
+    }
+
+    // Prepare text for embedding (combine title, excerpt, content, and PDF text)
+    let textToEmbed = `${article.title}\n\n${article.excerpt || ''}\n\n${article.content}`;
+    if (article.pdfText) {
+      textToEmbed += `\n\n--- PDF Content ---\n${article.pdfText}`;
+    }
+
+    // Generate embedding
+    const embedding = await embeddingService.generateEmbedding(textToEmbed);
+
+    // Save or update embedding
+    await ArticleEmbedding.findOneAndUpdate(
+      { article: articleId },
+      {
+        article: articleId,
+        embedding,
+        textContent: textToEmbed,
+        embeddingModel: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
+        lastUpdated: new Date()
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({
+      success: true,
+      message: 'Article indexed successfully',
+      articleId,
+      title: article.title
+    });
+
+  } catch (error) {
+    console.error('Error indexing article:', error);
+    res.status(500).json({ 
+      message: 'Error indexing article',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Index all approved articles for RAG
+ * @route POST /api/chatbot/index-all
+ */
+exports.indexAllArticles = async (req, res) => {
+  try {
+    // Check if embedding service is configured
+    if (!embeddingService.isConfigured()) {
+      return res.status(503).json({
+        message: 'Embedding service is not configured. Please set OPENAI_API_KEY.'
+      });
+    }
+
+    // Get all approved articles
+    const articles = await Article.find({ status: 'APPROVED' });
+
+    if (articles.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No approved articles to index',
+        indexed: 0
+      });
+    }
+
+    let indexed = 0;
+    let failed = 0;
+    const errors = [];
+
+    // Index each article
+    for (const article of articles) {
+      try {
+        let textToEmbed = `${article.title}\n\n${article.excerpt || ''}\n\n${article.content}`;
+        if (article.pdfText) {
+          textToEmbed += `\n\n--- PDF Content ---\n${article.pdfText}`;
+        }
+        const embedding = await embeddingService.generateEmbedding(textToEmbed);
+
+        await ArticleEmbedding.findOneAndUpdate(
+          { article: article._id },
+          {
+            article: article._id,
+            embedding,
+            textContent: textToEmbed,
+            embeddingModel: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
+            lastUpdated: new Date()
+          },
+          { upsert: true, new: true }
+        );
+
+        indexed++;
+      } catch (error) {
+        failed++;
+        errors.push({
+          articleId: article._id,
+          title: article.title,
+          error: error.message
+        });
+        console.error(`Error indexing article ${article._id}:`, error);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Indexed ${indexed} articles`,
+      indexed,
+      failed,
+      total: articles.length,
+      errors: errors.length > 0 ? errors : undefined
+    });
+
+  } catch (error) {
+    console.error('Error indexing all articles:', error);
+    res.status(500).json({ 
+      message: 'Error indexing articles',
+      error: error.message 
+    });
+  }
+};
+
+/**
+ * Get indexing status
+ * @route GET /api/chatbot/index-status
+ */
+exports.getIndexStatus = async (req, res) => {
+  try {
+    const totalApproved = await Article.countDocuments({ status: 'APPROVED' });
+    const totalIndexed = await ArticleEmbedding.countDocuments();
+    
+    const indexed = await ArticleEmbedding.find()
+      .populate('article', 'title status')
+      .sort({ lastUpdated: -1 })
+      .limit(10);
+
+    const recentlyUpdated = indexed.filter(e => e.article).map(e => ({
+      articleId: e.article._id,
+      title: e.article.title,
+      lastUpdated: e.lastUpdated,
+      model: e.embeddingModel
+    }));
+
+    res.json({
+      configured: embeddingService.isConfigured(),
+      totalApproved,
+      totalIndexed,
+      needsIndexing: totalApproved - totalIndexed,
+      recentlyUpdated
+    });
+
+  } catch (error) {
+    console.error('Error getting index status:', error);
+    res.status(500).json({ 
+      message: 'Error getting index status',
       error: error.message 
     });
   }

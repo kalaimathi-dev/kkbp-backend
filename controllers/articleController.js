@@ -1,4 +1,7 @@
 const { Article, User, Category, Tag } = require("../models");
+const fs = require('fs');
+const path = require('path');
+const pdf = require('pdf-parse');
 
 // @desc    Get all articles with filters
 // @route   GET /api/articles
@@ -57,6 +60,8 @@ exports.getArticles = async (req, res) => {
       authorEmail: article.author?.email,
       category: article.category?.name || null,
       tags: (article.tags || []).map((tag) => tag.name),
+      pdfFile: article.pdfFile,
+      pdfOriginalName: article.pdfOriginalName,
       createdAt: article.createdAt,
       updatedAt: article.updatedAt,
     }));
@@ -99,6 +104,8 @@ exports.getArticle = async (req, res) => {
       category: article.category?.name || null,
       tags: (article.tags || []).map((tag) => tag.name),
       rejectionReason: article.rejectionReason,
+      pdfFile: article.pdfFile,
+      pdfOriginalName: article.pdfOriginalName,
       createdAt: article.createdAt,
       updatedAt: article.updatedAt,
     };
@@ -143,20 +150,54 @@ exports.createArticle = async (req, res) => {
       categoryId = categoryRecord._id;
     }
 
-    // Create article
+    // Handle PDF file if uploaded
+    let pdfFileName = null;
+    let pdfOriginalName = null;
+    let pdfText = '';
+    
+    if (req.file) {
+      pdfFileName = req.file.filename;
+      pdfOriginalName = req.file.originalname;
+      
+      // Extract text from PDF for RAG indexing
+      try {
+        const pdfBuffer = fs.readFileSync(req.file.path);
+        const pdfData = await pdf(pdfBuffer);
+        pdfText = pdfData.text || '';
+        console.log(`Extracted ${pdfText.length} characters from PDF: ${pdfOriginalName}`);
+      } catch (pdfError) {
+        console.error('Error extracting PDF text:', pdfError);
+        // Continue without PDF text extraction
+      }
+    }
+
+    // Create article (keep content clean - PDF text stored separately)
     const article = await Article.create({
       title,
-      content,
+      content: content,  // User's content only
       excerpt,
       status: status || "PENDING",
       author: req.user.id,
       category: categoryId,
+      pdfFile: pdfFileName,
+      pdfOriginalName: pdfOriginalName,
+      pdfText: pdfText || null,  // Store PDF text separately for RAG
     });
 
-    // Handle tags
-    if (tags && tags.length > 0) {
+    // Handle tags - parse JSON string if needed (from FormData)
+    let tagsArray = tags;
+    if (typeof tags === 'string') {
+      try {
+        tagsArray = JSON.parse(tags);
+      } catch (e) {
+        // If not JSON, split by comma
+        tagsArray = tags.split(',').map(t => t.trim()).filter(t => t);
+      }
+    }
+    
+    if (tagsArray && tagsArray.length > 0) {
       const tagDocs = await Promise.all(
-        tags
+        tagsArray
           .filter(Boolean)
           .map((tagName) => tagName.toString().trim())
           .filter((tagName) => tagName.length > 0)

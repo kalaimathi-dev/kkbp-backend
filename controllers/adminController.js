@@ -286,8 +286,30 @@ exports.getAllArticlesAdmin = async (req, res) => {
       Article.countDocuments(filter),
     ]);
 
+    // Format articles to ensure tags and categories are strings, not objects
+    const formattedArticles = articles.map(article => ({
+      id: article._id,
+      title: article.title,
+      content: article.content,
+      excerpt: article.excerpt,
+      status: article.status,
+      views: article.views,
+      bookmarks: article.bookmarks,
+      author: article.author?.username,
+      authorEmail: article.author?.email,
+      category: article.category?.name || null,
+      tags: (article.tags || []).map(tag => typeof tag === 'string' ? tag : tag.name),
+      pdfFile: article.pdfFile,
+      pdfOriginalName: article.pdfOriginalName,
+      rejectionReason: article.rejectionReason,
+      approvedBy: article.approvedBy?.username || null,
+      approvedAt: article.approvedAt,
+      createdAt: article.createdAt,
+      updatedAt: article.updatedAt
+    }));
+
     res.json({
-      articles,
+      articles: formattedArticles,
       pagination: {
         total,
         page: parseInt(page),
